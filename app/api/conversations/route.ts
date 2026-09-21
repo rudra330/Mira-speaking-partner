@@ -6,7 +6,7 @@ const snapshot = z.object({ id: z.string().uuid(), title: z.string().min(1).max(
 
 export async function GET(request: Request) {
   return api(async () => {
-    const user = await identity();
+    const user = await identity(request);
     const id = new URL(request.url).searchParams.get("id");
     if (id) {
       z.string().uuid().parse(id);

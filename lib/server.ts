@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { getChatGPTUser } from "@/app/chatgpt-auth";
+import { browserToken, browserOwner } from "./browser-session";
 import { z } from "zod";
 
 export class ApiError extends Error {
@@ -16,14 +16,14 @@ export async function api(action: () => Promise<Response>) {
     return json({ error: "This service is temporarily unavailable. Please try again." }, 503);
   }
 }
-export async function identity(request?: Request) {
-  if (request && request.method !== "GET") {
+export async function identity(request: Request) {
+  if (request.method !== "GET") {
     const origin = request.headers.get("origin");
     if (origin && origin !== new URL(request.url).origin) throw new ApiError(403, "Please open Mira directly to continue.");
   }
-  const user = await getChatGPTUser();
-  if (!user) throw new ApiError(401, "Sign in to keep your conversations private.");
-  return user;
+  const token = browserToken(request);
+  if (!token) throw new ApiError(401, "Please allow cookies for Mira and refresh the page to restore your browser session.");
+  return { userId: await browserOwner(token) };
 }
 export function database() {
   if (!env.DB) throw new ApiError(503, "Conversation history is temporarily unavailable. Your current transcript is still available to download.");

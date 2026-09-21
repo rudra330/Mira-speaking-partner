@@ -4,7 +4,7 @@ import { defaultSettings, interruptTranscript, updateTranscript, type Message, t
 import { GeminiLive } from "./gemini-live";
 
 type Phase = "idle" | "connecting" | "listening" | "thinking" | "speaking" | "ended";
-type Config = { authenticated: boolean; configured: boolean; provider: "openai" | "gemini"; name: string | null };
+type Config = { sessionReady: boolean; configured: boolean; provider: "openai" | "gemini"; name: string | null };
 type SaveState = "empty" | "saving" | "saved" | "error";
 export async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...init, signal: init?.signal ?? AbortSignal.timeout(15000), headers: { "Content-Type": "application/json", ...init?.headers } });
