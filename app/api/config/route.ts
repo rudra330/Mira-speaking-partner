@@ -4,7 +4,7 @@ import { browserToken, newBrowserToken, sessionCookie } from "@/lib/browser-sess
 export async function GET(request: Request) {
   return api(async () => {
     const token = browserToken(request) || newBrowserToken();
-    const response = json({ sessionReady: true, configured: !!(env.GEMINI_API_KEY || env.OPENAI_API_KEY), provider: env.GEMINI_API_KEY ? "gemini" : "openai", name: null });
+    const response = json({ sessionReady: true, configured: !!(env.GEMINI_API_KEY || env.OPENAI_API_KEY), provider: env.GEMINI_API_KEY ? "gemini" : "openai", transcription: env.GEMINI_API_KEY && env.WHISPER_URL && env.WHISPER_API_KEY ? "whisper" : "native", name: null });
     response.headers.set("Set-Cookie", sessionCookie(request, token));
     return response;
   });

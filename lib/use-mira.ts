@@ -3,8 +3,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { defaultSettings, interruptTranscript, updateTranscript, type Message, type Snapshot, type VoiceSettings, type RealtimeEvent } from "./conversation";
 import { GeminiLive } from "./gemini-live";
 
-type Phase = "idle" | "connecting" | "listening" | "thinking" | "speaking" | "ended";
-type Config = { sessionReady: boolean; configured: boolean; provider: "openai" | "gemini"; name: string | null };
+type Phase = "idle" | "connecting" | "listening" | "transcribing" | "thinking" | "speaking" | "ended";
+type Config = { sessionReady: boolean; configured: boolean; provider: "openai" | "gemini"; transcription: "whisper" | "native"; name: string | null };
 type SaveState = "empty" | "saving" | "saved" | "error";
 export async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...init, signal: init?.signal ?? AbortSignal.timeout(15000), headers: { "Content-Type": "application/json", ...init?.headers } });
@@ -152,7 +152,7 @@ export function useMira() {
       void audioContext.resume().catch(() => {});
       if (config?.provider === "gemini" && !apiKey) {
         const live = new GeminiLive({
-          context: audioContext, settings, textOnly, signal: controller.signal,
+          context: audioContext, settings, textOnly, signal: controller.signal, whisper: config.transcription === "whisper",
           onStream: capture => {
             stream.current = capture;
             const track = capture.getAudioTracks()[0];
@@ -171,6 +171,7 @@ export function useMira() {
           onLevel: (output, input) => { if (active()) { setLevel(output); setMicLevel(input); } },
           onBlocked: () => { if (active()) setAudioBlocked(true); },
           onError: message => { if (active()) { end(); setError(message); } },
+          onNotice: message => { if (active()) setError(message); },
         });
         gemini.current = live;
         await live.connect();
@@ -316,7 +317,7 @@ export function useMira() {
       if (stored && ["marin", "cedar", "coral", "sage"].includes(stored.voice) && ["far_field", "near_field"].includes(stored.microphone) && ["auto", "low"].includes(stored.pace) && ["auto", "en", "bn"].includes(stored.language) && typeof stored.noiseReduction === "boolean") setSettings(stored);
     } catch { /* Device preferences are optional. */ }
     const timer = setInterval(() => {
-      if (["listening", "thinking", "speaking"].includes(ref.current.phase)) {
+      if (["listening", "transcribing", "thinking", "speaking"].includes(ref.current.phase)) {
         const elapsed = Math.floor((Date.now() - ref.current.startedAt) / 1000);
         ref.current.duration = elapsed; setDuration(elapsed);
         if (elapsed && elapsed % 15 === 0) queueSave(true);

@@ -12,6 +12,9 @@ Choose Start talking, review the microphone notice, and allow the browser’s pe
 
 ## Conversation behavior
 
+- When the Whisper service is configured, the voice path is microphone → faster-whisper → text → Gemini Live → avatar audio. Short recordings stay in memory while being transcribed; their recognized text appears in the chat. See `services/whisper/README.md` for service deployment and runtime configuration. Whisper does not use the OpenAI API or an OpenAI key.
+- Whisper mode segments speech on a short pause and shows a transcription status. Starting to speak stops queued avatar playback; stale reply audio stays discarded while the next recognized turn is prepared. Transcript latency depends on the server and recording length.
+
 - Gemini uses an AudioWorklet to capture mono 16 kHz PCM, streams directly over a token-authenticated WebSocket, and schedules streamed PCM responses for playback. Gemini's interruption events immediately stop queued audio. Session resumption handles planned connection renewals. OpenAI uses WebRTC and a server-side SDP handshake.
 - Semantic voice activity detection supports natural pauses and automatic interruption. WebRTC’s server output buffer cancels and truncates unplayed audio. Text interruptions wait for cancellation before starting a replacement response.
 - Echo cancellation, automatic gain control, browser noise suppression, and optional browser voice isolation help with noise. Gemini uses speech detection sensitivity appropriate to the microphone; OpenAI additionally uses server near/far-field reduction. This is not speaker authentication and cannot reliably exclude all nearby speakers.

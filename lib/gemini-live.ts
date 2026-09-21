@@ -1,12 +1,15 @@
 import type { RealtimeEvent, VoiceSettings } from "./conversation";
+import { UtteranceRecorder } from "./whisper-recorder.ts";
 
 type Options = {
   context: AudioContext; settings: VoiceSettings; textOnly: boolean; signal: AbortSignal;
+  whisper?: boolean;
   onStream: (stream: MediaStream) => void;
   onEvent: (event: RealtimeEvent) => void;
-  onPhase: (phase: "listening" | "thinking" | "speaking") => void;
+  onPhase: (phase: "listening" | "transcribing" | "thinking" | "speaking") => void;
   onLevel: (output: number, input: number) => void;
   onBlocked: () => void; onError: (message: string) => void;
+  onNotice?: (message: string) => void;
 };
 type ServerContent = {
   interrupted?: boolean; turnComplete?: boolean; generationComplete?: boolean;
@@ -38,6 +41,12 @@ export class GeminiLive {
   private model = "";
   private resumeHandle = "";
   private reconnecting = false;
+  private recorder: UtteranceRecorder | null = null;
+  private recordings: ArrayBuffer[] = [];
+  private transcribing = false;
+  private whisperSpeaking = false;
+  private awaitingTurn = false;
+  private pendingWhisperText = "";
 
   private options: Options;
   constructor(options: Options) {
@@ -64,8 +73,21 @@ export class GeminiLive {
       this.micSource.connect(this.inputMeter); this.micSource.connect(this.capture);
       // The worklet outputs silence; connecting it keeps capture processing active on Safari.
       this.capture.connect(context.destination);
+      if (this.options.whisper) {
+        this.recorder = new UtteranceRecorder(() => {
+          this.whisperSpeaking = true;
+          this.interruptWhisperReply();
+          this.options.onPhase("listening");
+        }, recording => {
+          this.whisperSpeaking = false;
+          if (this.recordings.length >= 3) { this.fail("Transcription is taking too long. Please reconnect and try again."); return; }
+          this.recordings.push(recording);
+          void this.transcribeRecordings();
+        }, settings.pace === "low" ? 1100 : 650, () => { this.whisperSpeaking = false; this.flushWhisperText(); });
+      }
       this.capture.port.onmessage = event => {
         if (!this.ready || this.closed || this.muted) return;
+        if (this.recorder) { this.recorder.push(new Int16Array(event.data as ArrayBuffer)); return; }
         if ((this.socket?.bufferedAmount ?? 0) > 256000) { this.fail("Your network is too slow for live audio. Reconnect when it improves."); return; }
         const bytes = new Uint8Array(event.data as ArrayBuffer);
         let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -103,7 +125,7 @@ export class GeminiLive {
         if (this.closed || this.socket !== socket) return;
         let data;
         try { data = JSON.parse(typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data)); } catch { return; }
-        if (data.setupComplete) { clearTimeout(timeout); opened = true; this.ready = true; this.reconnecting = false; resolve(); }
+        if (data.setupComplete) { clearTimeout(timeout); opened = true; this.ready = true; this.reconnecting = false; this.flushWhisperText(); resolve(); }
         if (data.sessionResumptionUpdate?.resumable) this.resumeHandle = data.sessionResumptionUpdate.newHandle || "";
         if (data.serverContent) this.handleContent(data.serverContent);
         if (data.goAway && this.resumeHandle && !this.reconnecting) {
@@ -142,7 +164,7 @@ export class GeminiLive {
       this.stopAudio(); this.outputId = ""; this.outputText = ""; this.dropOutput = false; this.generating = false;
       this.emit({ type: "input_audio_buffer.speech_started" }); this.options.onPhase("listening");
     }
-    if (content.inputTranscription?.text) {
+    if (!this.options.whisper && content.inputTranscription?.text) {
       this.beginInput(); this.inputText += content.inputTranscription.text;
       this.emit({ type: "conversation.item.input_audio_transcription.completed", item_id: this.inputId, transcript: this.inputText });
       this.options.onPhase("thinking");
@@ -164,7 +186,9 @@ export class GeminiLive {
       if (this.outputId && !this.dropOutput) this.emit({ type: "response.output_audio_transcript.done", item_id: this.outputId, transcript: this.outputText });
       this.outputId = ""; this.outputText = ""; this.generating = false; this.dropOutput = false;
       this.emit({ type: "response.done" });
-      if (!this.sources.size) this.options.onPhase("listening");
+      this.awaitingTurn = false;
+      if (!this.sources.size) this.options.onPhase(this.transcribing ? "transcribing" : "listening");
+      this.flushWhisperText();
     }
   }
   private play(encoded: string, rate: number) {
@@ -182,19 +206,71 @@ export class GeminiLive {
   }
   sendText(text: string) {
     if (!this.ready || this.closed) return false;
+    if (this.options.whisper) {
+      if (this.awaitingTurn || this.sources.size) this.interruptWhisperReply();
+      this.pendingWhisperText = [this.pendingWhisperText, text].filter(Boolean).join("\n");
+      this.flushWhisperText();
+      return true;
+    }
     this.dropOutput = this.generating;
     this.stopAudio(); this.finishInput(); this.inputId = ""; this.inputText = "";
     this.outputId = ""; this.outputText = "";
     this.options.onPhase("thinking");
     return this.send({ clientContent: { turns: [{ role: "user", parts: [{ text }] }], turnComplete: true } });
   }
+  private interruptWhisperReply() {
+    this.stopAudio();
+    this.dropOutput = this.awaitingTurn;
+    this.emit({ type: "input_audio_buffer.speech_started" });
+  }
+  private flushWhisperText() {
+    if (!this.options.whisper || !this.pendingWhisperText || this.awaitingTurn || this.whisperSpeaking || this.transcribing || this.recordings.length || this.closed || !this.ready) return;
+    const text = this.pendingWhisperText;
+    this.outputId = ""; this.outputText = ""; this.dropOutput = false;
+    if (this.send({ clientContent: { turns: [{ role: "user", parts: [{ text }] }], turnComplete: true } })) {
+      this.pendingWhisperText = ""; this.awaitingTurn = true; this.generating = true;
+      this.options.onPhase("thinking");
+    }
+  }
+  private async transcribeRecordings() {
+    if (this.transcribing || this.closed) return;
+    this.transcribing = true;
+    try {
+      while (this.recordings.length && !this.closed) {
+        if (!this.whisperSpeaking) this.options.onPhase("transcribing");
+        const recording = this.recordings.shift()!;
+        const response = await fetch(`/api/transcribe?language=${this.options.settings.language}`, {
+          method: "POST", headers: { "Content-Type": "audio/wav" }, body: recording,
+          signal: AbortSignal.any([this.options.signal, AbortSignal.timeout(45000)]),
+        });
+        const data = await response.json() as { text?: string; error?: string };
+        if (this.closed || this.options.signal.aborted) return;
+        if (!response.ok) throw new Error(data.error || "Whisper could not transcribe your speech. Please try again.");
+        if (data.text?.trim()) {
+          const text = data.text.trim();
+          this.emit({ type: "conversation.item.input_audio_transcription.completed", item_id: `whisper_${crypto.randomUUID()}`, transcript: text });
+          this.pendingWhisperText = [this.pendingWhisperText, text].filter(Boolean).join("\n");
+        } else this.options.onNotice?.("No clear speech was recognized. Please try speaking again.");
+      }
+    } catch (error) {
+      if (!this.closed && !this.options.signal.aborted) this.fail(error instanceof Error ? error.message : "Whisper transcription failed. Please reconnect.");
+    } finally {
+      this.transcribing = false;
+      if (!this.closed) {
+        this.flushWhisperText();
+        if (!this.awaitingTurn && !this.sources.size) this.options.onPhase("listening");
+      }
+    }
+  }
   setMicMuted(muted: boolean) {
+    if (this.options.whisper && muted) { this.recorder?.flush(); this.whisperSpeaking = false; this.flushWhisperText(); }
     this.muted = muted; this.capture?.port.postMessage({ enabled: !muted });
-    if (muted) this.send({ realtimeInput: { audioStreamEnd: true } });
+    if (muted && !this.options.whisper) this.send({ realtimeInput: { audioStreamEnd: true } });
   }
   setVolumeMuted(muted: boolean) { this.output.gain.value = muted ? 0 : 1; }
   close() {
     this.closed = true; this.ready = false; cancelAnimationFrame(this.frame); this.stopAudio();
+    this.recorder?.reset(); this.recordings = []; this.pendingWhisperText = "";
     this.socket?.close(); this.capture?.disconnect(); this.capture?.port.close(); this.micSource?.disconnect();
     this.microphone?.getTracks().forEach(track => track.stop()); this.output.disconnect(); this.outputMeter.disconnect();
   }
