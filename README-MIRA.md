@@ -1,22 +1,22 @@
 # Mira
 
-A private voice conversation app built with React, Vinext, Cloudflare Workers, D1, and the OpenAI Realtime API over WebRTC.
+A private voice conversation app built with React, Vinext, Cloudflare Workers, and D1. It supports Gemini Live over WebSockets and OpenAI Realtime over WebRTC.
 
 ## Use
 
-Sign in with ChatGPT, open Settings, and enter an OpenAI API key with Realtime access. A personal key is held only in page memory and sent to the same-origin server for the connection handshake. It is not stored in the database, browser storage, or logs. Refreshing the page forgets it. API use is charged to that API account.
+Sign in with ChatGPT and choose Start talking. The current hosted copy uses Gemini Live with a server secret. The browser receives only a short-lived, single-session token restricted to the voice configuration. No provider key is embedded in source or the client bundle.
 
-Alternatively configure `OPENAI_API_KEY` as a server secret in the hosting environment. `OPENAI_REALTIME_MODEL` defaults to `gpt-realtime-2.1`. `.env.example` lists both variables. No secret has been included with this project.
+Configure `GEMINI_API_KEY` as a server secret; `GEMINI_LIVE_MODEL` defaults to `gemini-2.5-flash-native-audio-latest`. Alternatively configure `OPENAI_API_KEY` with `OPENAI_REALTIME_MODEL` (default `gpt-realtime-2.1`). Gemini takes priority when both are configured. When no server provider is configured, Settings accepts a personal OpenAI key in page memory only. Refreshing forgets it. API use is charged to the configured account. `.env.example` lists settings without secret values.
 
 Choose Start talking, review the microphone notice, and allow the browser’s permission request. Text input can start a session without microphone permission. End conversation closes the peer connection, stops microphone tracks, and closes the audio context. Calls end after 30 minutes.
 
 ## Conversation behavior
 
-- Speech-to-speech audio uses WebRTC and a server-side SDP handshake; the provider key is not embedded in the bundle.
+- Gemini uses an AudioWorklet to capture mono 16 kHz PCM, streams directly over a token-authenticated WebSocket, and schedules streamed PCM responses for playback. Gemini's interruption events immediately stop queued audio. Session resumption handles planned connection renewals. OpenAI uses WebRTC and a server-side SDP handshake.
 - Semantic voice activity detection supports natural pauses and automatic interruption. WebRTC’s server output buffer cancels and truncates unplayed audio. Text interruptions wait for cancellation before starting a replacement response.
-- Echo cancellation, automatic gain control, browser noise suppression, optional browser voice isolation, and server near/far-field reduction help with noise. This is not speaker authentication and cannot reliably exclude all nearby speakers.
+- Echo cancellation, automatic gain control, browser noise suppression, and optional browser voice isolation help with noise. Gemini uses speech detection sensitivity appropriate to the microphone; OpenAI additionally uses server near/far-field reduction. This is not speaker authentication and cannot reliably exclude all nearby speakers.
 - The avatar is an original illustrated portrait with audio-reactive motion and a live waveform. It is not a photorealistic, lip-synced video avatar.
-- Both speakers’ transcripts are streamed into chat and saved to D1 under the signed-in user’s identity. Audio recordings are not retained by this app. OpenAI processes the audio under the API account’s applicable data terms.
+- Both speakers’ transcripts are streamed into chat and saved to D1 under the signed-in user’s identity. Audio recordings are not retained by this app. The selected provider processes audio under that API account’s applicable data terms; microphone consent names that provider.
 - Transcriptions are an approximate record. An interrupted output is labeled because text can arrive before its audio is heard.
 - History supports viewing, downloading, and deleting conversations. Monotonic revisions prevent delayed autosaves from overwriting newer text. Failed saves remain in memory, visibly offer retry/export, and warn before closing the page. Unsent data cannot survive browser termination.
 
@@ -26,7 +26,7 @@ Run `npm run install:ci`, then `npm run dev`. The development URL is printed by 
 
 Generate database migrations with `npm run db:generate`. Build with `npm run build`, then apply the generated migration locally using the starter’s documented Wrangler command in `README.md`. Sites applies migrations during deployment.
 
-Run `node --experimental-strip-types --test tests/conversation.test.mjs` and `node node_modules/typescript/bin/tsc --noEmit` for local validation.
+Run `node --experimental-strip-types --test tests/conversation.test.mjs tests/gemini.test.mjs` and `node node_modules/typescript/bin/tsc --noEmit` for local validation. With a local preview running, `node tests/api.integration.mjs` checks database save/reload, stale revision handling, origin checks, and unauthorized access with one disposable record.
 
 ## Reference
 
@@ -34,4 +34,4 @@ Run `node --experimental-strip-types --test tests/conversation.test.mjs` and `no
 - https://developers.openai.com/api/docs/guides/realtime-vad
 - https://developers.openai.com/api/docs/guides/realtime-conversations
 
-Live microphone quality, timing, and model responses require a real API key and a device/browser test. No key was available during initial implementation, so those aspects were not verified against a live paid AI session.
+Validation includes a real Gemini audio response and transcript using the exact restricted-token route configuration. The supplied OpenAI key authenticated but generation reported exhausted credits, so the hosted app uses Gemini. Unit checks cover interruption playback clearing, stale transcript events, mute signaling, and PCM resampling. Live microphone capture, acoustics, and interruption timing still need a physical-device test.

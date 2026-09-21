@@ -1,9 +1,10 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { defaultSettings, interruptTranscript, updateTranscript, type Message, type Snapshot, type VoiceSettings, type RealtimeEvent } from "./conversation";
+import { GeminiLive } from "./gemini-live";
 
 type Phase = "idle" | "connecting" | "listening" | "thinking" | "speaking" | "ended";
-type Config = { authenticated: boolean; configured: boolean; name: string | null };
+type Config = { authenticated: boolean; configured: boolean; provider: "openai" | "gemini"; name: string | null };
 type SaveState = "empty" | "saving" | "saved" | "error";
 export async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...init, signal: init?.signal ?? AbortSignal.timeout(15000), headers: { "Content-Type": "application/json", ...init?.headers } });
@@ -29,6 +30,7 @@ export function useMira() {
   const [voiceIsolation, setVoiceIsolation] = useState(false);
   const ref = useRef({ phase: "idle" as Phase, messages: [] as Message[], duration: 0, id: "", createdAt: "", revision: 0, startedAt: 0, muted: false, speakingItem: "", generating: false, pendingText: "" });
   const pc = useRef<RTCPeerConnection | null>(null);
+  const gemini = useRef<GeminiLive | null>(null);
   const dc = useRef<RTCDataChannel | null>(null);
   const stream = useRef<MediaStream | null>(null);
   const audio = useRef<HTMLAudioElement | null>(null);
@@ -84,6 +86,7 @@ export function useMira() {
     if (disconnectTimer.current) clearTimeout(disconnectTimer.current);
     cancelAnimationFrame(frame.current);
     stream.current?.getTracks().forEach(track => { track.onended = null; track.stop(); }); stream.current = null;
+    gemini.current?.close(); gemini.current = null;
     if (dc.current) { dc.current.onclose = null; dc.current.onerror = null; dc.current.onmessage = null; dc.current.close(); dc.current = null; }
     if (pc.current) { pc.current.onconnectionstatechange = null; pc.current.ontrack = null; pc.current.close(); pc.current = null; }
     if (audio.current) { audio.current.pause(); audio.current.srcObject = null; audio.current = null; }
@@ -109,6 +112,12 @@ export function useMira() {
   }, [changeMessages, sendEvent, transition]);
   const sendText = useCallback((text: string) => {
     text = text.trim();
+    if (gemini.current) {
+      if (!text || text.length > 4000 || !gemini.current.sendText(text)) return false;
+      changeMessages(old => [...interruptTranscript(old, ref.current.speakingItem), { id: `text_${crypto.randomUUID()}`, role: "user", text, at: new Date().toISOString(), status: "final", source: "text" }]);
+      ref.current.speakingItem = "";
+      return true;
+    }
     if (!text || text.length > 4000 || dc.current?.readyState !== "open") return false;
     // Wait for response.done after cancel before requesting the next response.
     if (ref.current.generating) {
@@ -141,6 +150,39 @@ export function useMira() {
       if (!window.isSecureContext || !window.RTCPeerConnection) throw new Error("Live voice needs a secure browser. Open this page in the latest Chrome, Edge, or Safari.");
       const audioContext = new AudioContext(); context.current = audioContext;
       void audioContext.resume().catch(() => {});
+      if (config?.provider === "gemini" && !apiKey) {
+        const live = new GeminiLive({
+          context: audioContext, settings, textOnly, signal: controller.signal,
+          onStream: capture => {
+            stream.current = capture;
+            const track = capture.getAudioTracks()[0];
+            track.onended = () => { end(); setError("Your microphone was disconnected. Reconnect it and start again."); };
+            setVoiceIsolation(!!(track.getSettings() as MediaTrackSettings & { voiceIsolation?: boolean }).voiceIsolation);
+          },
+          onEvent: data => {
+            if (!active()) return;
+            if (data.type === "input_audio_buffer.speech_started") changeMessages(old => interruptTranscript(old, ref.current.speakingItem));
+            if (data.type === "response.output_audio_transcript.delta") ref.current.speakingItem = data.item_id || "";
+            changeMessages(old => updateTranscript(old, data));
+            if (data.type === "response.done") queueSave(true);
+            if (ref.current.messages.length >= 480) { end(); setError("This conversation is full. Check the save status, then start a new conversation to continue."); }
+          },
+          onPhase: next => { if (active()) { if (next === "listening") ref.current.speakingItem = ""; transition(next); } },
+          onLevel: (output, input) => { if (active()) { setLevel(output); setMicLevel(input); } },
+          onBlocked: () => { if (active()) setAudioBlocked(true); },
+          onError: message => { if (active()) { end(); setError(message); } },
+        });
+        gemini.current = live;
+        await live.connect();
+        if (!active()) { live.close(); return; }
+        if (connectTimer.current) clearTimeout(connectTimer.current);
+        ref.current.startedAt = Date.now(); transition("listening");
+        if (firstText.trim()) {
+          changeMessages(old => [...old, { id: `text_${crypto.randomUUID()}`, role: "user", text: firstText.trim(), at: new Date().toISOString(), status: "final", source: "text" }]);
+          live.sendText(firstText.trim());
+        } else live.sendText("Greet me as Mira in one brief sentence and ask what is on my mind.");
+        return;
+      }
       let micAnalyser: AnalyserNode | undefined;
       let outputAnalyser: AnalyserNode | undefined;
       const connection = new RTCPeerConnection(); pc.current = connection;
@@ -244,14 +286,16 @@ export function useMira() {
       const name = failure instanceof Error ? failure.name : "";
       setError(name === "NotAllowedError" ? "Microphone permission was not granted. Allow it in your browser’s site settings, then try again. You can also type a message." : name === "NotFoundError" ? "No microphone was found. Connect one or type a message instead." : name === "NotReadableError" ? "Your microphone is busy or unavailable. Close other apps using it and try again." : failure instanceof Error ? failure.message : "Unable to start the conversation.");
     }
-  }, [apiKey, settings, changeMessages, cleanup, end, queueSave, sendEvent, sendTextNow, transition]);
+  }, [apiKey, config, settings, changeMessages, cleanup, end, queueSave, sendEvent, sendTextNow, transition]);
   const toggleMic = useCallback(() => {
     if (!stream.current) return;
     ref.current.muted = !ref.current.muted;
     stream.current.getAudioTracks().forEach(track => { track.enabled = !ref.current.muted; });
+    gemini.current?.setMicMuted(ref.current.muted);
     setMuted(ref.current.muted);
   }, []);
   const toggleVolume = useCallback(() => {
+    if (gemini.current) { setVolumeMuted(previous => { gemini.current?.setVolumeMuted(!previous); return !previous; }); return; }
     if (!audio.current) return;
     audio.current.muted = !audio.current.muted; setVolumeMuted(audio.current.muted);
   }, []);
