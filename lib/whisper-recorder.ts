@@ -25,7 +25,7 @@ export class UtteranceRecorder {
   private onRecording: (audio: ArrayBuffer) => void;
   private pauseMs: number;
   private onStop: () => void;
-  constructor(onStart: () => void, onRecording: (audio: ArrayBuffer) => void, pauseMs = 650, onStop = () => {}) {
+  constructor(onStart: () => void, onRecording: (audio: ArrayBuffer) => void, pauseMs = 450, onStop = () => {}) {
     this.onStart = onStart; this.onRecording = onRecording; this.pauseMs = pauseMs; this.onStop = onStop;
   }
   push(samples: Int16Array) {

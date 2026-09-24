@@ -9,7 +9,9 @@ test('speech recording retains onset, ends on a pause, and encodes real PCM16 WA
   const silence = () => new Int16Array(800);
   for (let i = 0; i < 10; i++) recorder.push(silence());
   for (let i = 0; i < 12; i++) recorder.push(new Int16Array(800).fill(5000));
-  for (let i = 0; i < 13; i++) recorder.push(silence());
+  for (let i = 0; i < 8; i++) recorder.push(silence());
+  assert.equal(clips.length, 0, 'a brief pause must not cut the sentence');
+  recorder.push(silence());
   assert.equal(starts, 1); assert.equal(clips.length, 1);
   const data = new DataView(clips[0]);
   assert.equal(data.getUint32(24, true), 16000);
@@ -29,6 +31,16 @@ test('short noise releases listening state and long speech is bounded', () => {
   for (let i = 0; i < 310; i++) recorder.push(new Int16Array(800).fill(5000));
   assert.equal(clips.length, 1); assert.ok(clips[0].byteLength <= 480044);
   recorder.reset(); recorder.flush(); assert.equal(clips.length, 1);
+});
+
+test('give me more time preserves a long pause without splitting speech', () => {
+  const clips = [];
+  const recorder = new UtteranceRecorder(() => {}, clip => clips.push(clip), 1100);
+  for (let i = 0; i < 12; i++) recorder.push(new Int16Array(800).fill(5000));
+  for (let i = 0; i < 20; i++) recorder.push(new Int16Array(800));
+  assert.equal(clips.length, 0);
+  recorder.push(new Int16Array(800)); recorder.push(new Int16Array(800));
+  assert.equal(clips.length, 1);
 });
 
 function fixture() {
@@ -56,22 +68,24 @@ test('Whisper text is displayed and sent to Gemini; microphone bytes are not sen
   await live.transcribeRecordings();
   assert.equal(events[0].transcript, 'Can you hear me?');
   assert.equal(events[0].type, 'conversation.item.input_audio_transcription.completed');
-  assert.deepEqual(sent, [{ clientContent: { turns: [{ role: 'user', parts: [{ text: 'Can you hear me?' }] }], turnComplete: true } }]);
+  assert.deepEqual(sent, [{ realtimeInput: { activityStart: {} } }, { realtimeInput: { text: 'Can you hear me?' } }, { realtimeInput: { activityEnd: {} } }]);
 });
 
-test('speaking cuts playback immediately and the next Whisper text waits for the old turn', () => {
+test('speaking cancels server generation immediately and sends the next text after interruption acknowledgement', () => {
   const { live, sent, events } = fixture(); let stopped = 0;
   live.sendText('First question');
   live.sources.add({ stop() { stopped++; }, disconnect() {} });
   live.interruptWhisperReply();
   live.sendText('Actually, a different question');
-  assert.equal(stopped, 1); assert.equal(sent.length, 1);
+  assert.equal(stopped, 1); assert.equal(sent.length, 4);
+  assert.deepEqual(sent[3], { realtimeInput: { activityStart: {} } });
   const before = events.length;
   live.handleContent({ outputTranscription: { text: 'stale answer' } });
   assert.equal(events.length, before);
-  live.handleContent({ turnComplete: true });
-  assert.equal(sent.length, 2);
-  assert.equal(sent[1].clientContent.turns[0].parts[0].text, 'Actually, a different question');
+  live.handleContent({ interrupted: true, turnComplete: true });
+  assert.equal(sent.length, 6, 'reuse the open activity; do not cancel it a second time');
+  assert.equal(sent[4].realtimeInput.text, 'Actually, a different question');
+  assert.deepEqual(sent[5], { realtimeInput: { activityEnd: {} } });
   live.handleContent({ outputTranscription: { text: 'The new answer' }, turnComplete: true });
   assert.ok(events.some(event => event.delta === 'The new answer'));
 });

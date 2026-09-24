@@ -28,7 +28,7 @@ export async function POST(request: Request) {
     if (speaches) {
       const form = new FormData();
       form.set("file", new Blob([audio], { type: "audio/wav" }), "speech.wav");
-      form.set("model", env.WHISPER_MODEL || "Systran/faster-whisper-small");
+      form.set("model", env.WHISPER_MODEL || "Systran/faster-whisper-base");
       form.set("response_format", "json");
       if (language !== "auto") form.set("language", language);
       recording = form;
@@ -36,6 +36,7 @@ export async function POST(request: Request) {
       endpoint.searchParams.set("language", language); headers["Content-Type"] = "audio/wav";
     }
     let result: Response;
+    const transcriptionStarted = performance.now();
     try {
       result = await fetch(endpoint, { method: "POST", headers, body: recording, redirect: "manual", signal: AbortSignal.any([request.signal, AbortSignal.timeout(40000)]) });
     } catch (error) {
@@ -45,6 +46,8 @@ export async function POST(request: Request) {
     if (!result.ok) throw new ApiError(result.status === 429 ? 429 : 502, result.status === 429 ? "Whisper is busy. Please try again in a moment." : "Whisper could not transcribe that recording. Please try again.");
     const data = await result.json() as { text?: unknown; language?: string };
     if (typeof data.text !== "string" || data.text.length > 8000) throw new ApiError(502, "Whisper returned an invalid transcript.");
-    return json({ text: data.text.trim(), language: data.language, engine: "faster-whisper" });
+    const response = json({ text: data.text.trim(), language: data.language, engine: "faster-whisper" });
+    response.headers.set("Server-Timing", `transcribe;dur=${Math.round(performance.now() - transcriptionStarted)}`);
+    return response;
   });
 }

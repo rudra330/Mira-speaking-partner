@@ -46,6 +46,7 @@ export class GeminiLive {
   private transcribing = false;
   private whisperSpeaking = false;
   private awaitingTurn = false;
+  private whisperActivity = false;
   private pendingWhisperText = "";
 
   private options: Options;
@@ -83,7 +84,7 @@ export class GeminiLive {
           if (this.recordings.length >= 3) { this.fail("Transcription is taking too long. Please reconnect and try again."); return; }
           this.recordings.push(recording);
           void this.transcribeRecordings();
-        }, settings.pace === "low" ? 1100 : 650, () => { this.whisperSpeaking = false; this.flushWhisperText(); });
+        }, settings.pace === "low" ? 1100 : 450, () => { this.whisperSpeaking = false; this.flushWhisperText(); });
       }
       this.capture.port.onmessage = event => {
         if (!this.ready || this.closed || this.muted) return;
@@ -221,13 +222,23 @@ export class GeminiLive {
   private interruptWhisperReply() {
     this.stopAudio();
     this.dropOutput = this.awaitingTurn;
+    // Cancel server generation as soon as speech begins, while Whisper works.
+    // Gemini's audio detector is disabled in this text-only Whisper pipeline.
+    if (this.awaitingTurn) this.startWhisperActivity();
     this.emit({ type: "input_audio_buffer.speech_started" });
+  }
+  private startWhisperActivity() {
+    if (this.whisperActivity) return true;
+    if (!this.send({ realtimeInput: { activityStart: {} } })) return false;
+    this.whisperActivity = true;
+    return true;
   }
   private flushWhisperText() {
     if (!this.options.whisper || !this.pendingWhisperText || this.awaitingTurn || this.whisperSpeaking || this.transcribing || this.recordings.length || this.closed || !this.ready) return;
     const text = this.pendingWhisperText;
     this.outputId = ""; this.outputText = ""; this.dropOutput = false;
-    if (this.send({ clientContent: { turns: [{ role: "user", parts: [{ text }] }], turnComplete: true } })) {
+    if (this.startWhisperActivity() && this.send({ realtimeInput: { text } }) && this.send({ realtimeInput: { activityEnd: {} } })) {
+      this.whisperActivity = false;
       this.pendingWhisperText = ""; this.awaitingTurn = true; this.generating = true;
       this.options.onPhase("thinking");
     }
@@ -270,7 +281,7 @@ export class GeminiLive {
   setVolumeMuted(muted: boolean) { this.output.gain.value = muted ? 0 : 1; }
   close() {
     this.closed = true; this.ready = false; cancelAnimationFrame(this.frame); this.stopAudio();
-    this.recorder?.reset(); this.recordings = []; this.pendingWhisperText = "";
+    this.recorder?.reset(); this.recordings = []; this.pendingWhisperText = ""; this.whisperActivity = false;
     this.socket?.close(); this.capture?.disconnect(); this.capture?.port.close(); this.micSource?.disconnect();
     this.microphone?.getTracks().forEach(track => track.stop()); this.output.disconnect(); this.outputMeter.disconnect();
   }
