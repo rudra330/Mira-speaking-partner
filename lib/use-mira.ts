@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { defaultSettings, interruptTranscript, updateTranscript, type Message, type Snapshot, type VoiceSettings, type RealtimeEvent } from "./conversation";
+import type { AvatarAudio } from "./avatar-audio";
 import { GeminiLive } from "./gemini-live";
 
 type Phase = "idle" | "connecting" | "listening" | "transcribing" | "thinking" | "speaking" | "ended";
@@ -14,6 +15,7 @@ export async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> 
 }
 
 export function useMira() {
+  const [avatarAudio, setAvatarAudio] = useState<AvatarAudio | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [messages, setMessages] = useState<Message[]>([]);
   const [duration, setDuration] = useState(0);
@@ -81,6 +83,7 @@ export function useMira() {
     queueSave();
   }, [queueSave]);
   const cleanup = useCallback(() => {
+    if (mounted.current) setAvatarAudio(null);
     abort.current?.abort(); abort.current = null;
     if (connectTimer.current) clearTimeout(connectTimer.current);
     if (disconnectTimer.current) clearTimeout(disconnectTimer.current);
@@ -174,6 +177,7 @@ export function useMira() {
           onNotice: message => { if (active()) setError(message); },
         });
         gemini.current = live;
+        setAvatarAudio({ context: audioContext, source: live.audioOutput });
         await live.connect();
         if (!active()) { live.close(); return; }
         if (connectTimer.current) clearTimeout(connectTimer.current);
@@ -194,7 +198,9 @@ export function useMira() {
         remoteAudio.srcObject = remote;
         void remoteAudio.play().catch(() => { if (active()) setAudioBlocked(true); });
         outputAnalyser = audioContext.createAnalyser(); outputAnalyser.fftSize = 256;
-        audioContext.createMediaStreamSource(remote).connect(outputAnalyser);
+        const remoteSource = audioContext.createMediaStreamSource(remote);
+        remoteSource.connect(outputAnalyser);
+        setAvatarAudio({ context: audioContext, source: remoteSource });
       };
       if (textOnly) connection.addTransceiver("audio", { direction: "recvonly" });
       else {
@@ -342,5 +348,5 @@ export function useMira() {
   const updateSettings = useCallback((next: VoiceSettings) => {
     setSettings(next); try { localStorage.setItem("mira.voice-preferences", JSON.stringify(next)); } catch { /* Keep in-memory preferences. */ }
   }, []);
-  return { phase, messages, duration, muted, volumeMuted, audioBlocked, level, micLevel, error, setError, saveState, config, settings, updateSettings, apiKey, setApiKey, voiceIsolation, start, end, toggleMic, toggleVolume, enableAudio, sendText, reset, retrySave: flush, currentId: ref.current.id, hasMicrophone: !!stream.current };
+  return { avatarAudio, phase, messages, duration, muted, volumeMuted, audioBlocked, level, micLevel, error, setError, saveState, config, settings, updateSettings, apiKey, setApiKey, voiceIsolation, start, end, toggleMic, toggleVolume, enableAudio, sendText, reset, retrySave: flush, currentId: ref.current.id, hasMicrophone: !!stream.current };
 }

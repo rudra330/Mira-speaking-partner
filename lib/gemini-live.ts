@@ -56,6 +56,7 @@ export class GeminiLive {
     this.outputMeter = options.context.createAnalyser(); this.outputMeter.fftSize = 256;
     this.output.connect(this.outputMeter); this.outputMeter.connect(options.context.destination);
   }
+  get audioOutput(): AudioNode { return this.output; }
   private emit(event: RealtimeEvent) { if (!this.closed) this.options.onEvent(event); }
   private fail(message: string) { if (!this.closed && !this.options.signal.aborted) this.options.onError(message); }
   async connect() {
