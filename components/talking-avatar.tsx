@@ -39,7 +39,7 @@ export function TalkingAvatar({ audio, phase, muted }: { audio: AvatarAudio | nu
         const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
         avatar = new TalkingHead(container.current, {
           // The renderer owns a separate silent context; disposing it must never suspend a call.
-          lipsyncModules: [], cameraView: 'head', cameraDistance: .8, cameraRotateEnable: false,
+          lipsyncModules: [], cameraView: 'head', cameraDistance: .8, cameraY: .45, cameraRotateEnable: false,
           cameraPanEnable: false, cameraZoomEnable: false, modelFPS: 30,
           modelPixelRatio: Math.min(window.devicePixelRatio, 1.5) / window.devicePixelRatio,
           avatarIdleEyeContact: .7, avatarSpeakingEyeContact: .85,
@@ -111,4 +111,5 @@ export function TalkingAvatar({ audio, phase, muted }: { audio: AvatarAudio | nu
     {lipError && <div className="avatar-load-status" role="status">Lip sync unavailable. Your conversation can continue.</div>}
   </div>;
 }
+
 
