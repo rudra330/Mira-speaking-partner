@@ -1,4 +1,4 @@
-import { env } from "cloudflare:workers";
+import { env } from "@/lib/runtime-env";
 import { z } from "zod";
 import { api, identity, body, ApiError } from "@/lib/server";
 
@@ -27,7 +27,7 @@ export async function POST(request: Request) {
           noise_reduction: data.noiseReduction ? { type: data.microphone } : null,
           transcription: { model: "gpt-4o-mini-transcribe", ...(data.language !== "auto" ? { language: data.language } : {}) },
           turn_detection: { type: "semantic_vad", eagerness: data.pace, create_response: true, interrupt_response: true },
-        }, output: { voice: data.voice },
+        }, output: { voice: data.voice === "cedar" ? "shimmer" : data.voice },
       },
     };
     const form = new FormData();

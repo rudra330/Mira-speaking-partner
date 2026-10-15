@@ -1,9 +1,12 @@
 import type { RealtimeEvent, VoiceSettings } from "./conversation";
 import { UtteranceRecorder } from "./whisper-recorder.ts";
+import { SpeechEndDetector } from "./speech-end-detector.ts";
+import type { MicVAD } from "@ricky0123/vad-web";
 
 type Options = {
   context: AudioContext; settings: VoiceSettings; textOnly: boolean; signal: AbortSignal;
   whisper?: boolean;
+  requestHeaders?: () => Promise<Record<string, string>>;
   onStream: (stream: MediaStream) => void;
   onEvent: (event: RealtimeEvent) => void;
   onPhase: (phase: "listening" | "transcribing" | "thinking" | "speaking") => void;
@@ -34,6 +37,7 @@ export class GeminiLive {
   private muted = false;
   private inputId = "";
   private inputText = "";
+  private inputFinalized = false;
   private outputId = "";
   private outputText = "";
   private dropOutput = false;
@@ -42,6 +46,11 @@ export class GeminiLive {
   private resumeHandle = "";
   private reconnecting = false;
   private recorder: UtteranceRecorder | null = null;
+  private speechEndDetector: SpeechEndDetector | null = null;
+  private localVad: MicVAD | null = null;
+  private nativeSpeaking = false;
+  private localInterrupted = false;
+  private cancelledTurn = false;
   private recordings: ArrayBuffer[] = [];
   private transcribing = false;
   private whisperSpeaking = false;
@@ -86,6 +95,21 @@ export class GeminiLive {
           this.recordings.push(recording);
           void this.transcribeRecordings();
         }, settings.pace === "low" ? 1100 : 450, () => { this.whisperSpeaking = false; this.flushWhisperText(); });
+      } else {
+        this.speechEndDetector = new SpeechEndDetector(() => {
+          // Energy is useful for flushing a pause, but must not cancel replies
+          // on fan noise or keyboard taps while the neural model is loading.
+          if (!this.localVad) this.finalizeNativeAudio();
+        }, settings.pace === "low" ? 1000 : 500);
+        // Load locally in parallel with the live connection; never delay PCM.
+        void import("./local-vad.ts").then(({ createLocalVad }) => createLocalVad(
+          context, stream, settings.pace === "low" ? 1000 : 500,
+          () => this.nativeSpeechStarted(), () => this.nativeSpeechEnded(),
+        )).then(async detector => {
+          if (this.closed || signal.aborted) { await detector.destroy(); return; }
+          this.localVad = detector;
+          if (this.muted) await detector.pause();
+        }).catch(() => { /* Lightweight local detection and server VAD remain available. */ });
       }
       this.capture.port.onmessage = event => {
         if (!this.ready || this.closed || this.muted) return;
@@ -94,9 +118,10 @@ export class GeminiLive {
         const bytes = new Uint8Array(event.data as ArrayBuffer);
         let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte);
         this.send({ realtimeInput: { audio: { data: btoa(binary), mimeType: "audio/pcm;rate=16000" } } });
+        this.speechEndDetector?.push(new Int16Array(event.data as ArrayBuffer));
       };
     }
-    const response = await fetch("/api/gemini", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(settings), signal });
+    const response = await fetch("/api/gemini", { method: "POST", headers: { "Content-Type": "application/json", ...await this.options.requestHeaders?.() }, body: JSON.stringify(settings), signal });
     const data = await response.json() as { token?: string; model?: string; error?: string };
     if (!response.ok || !data.token || !data.model) throw new Error(data.error || "Unable to start the live connection.");
     signal.throwIfAborted(); this.token = data.token; this.model = data.model;
@@ -149,11 +174,14 @@ export class GeminiLive {
     this.socket.send(JSON.stringify(message)); return true;
   }
   private finishInput() {
-    if (this.inputId) this.emit({ type: "conversation.item.input_audio_transcription.completed", item_id: this.inputId, transcript: this.inputText });
+    if (this.inputId && !this.inputFinalized) {
+      this.emit({ type: "conversation.item.input_audio_transcription.completed", item_id: this.inputId, transcript: this.inputText });
+      this.inputFinalized = true;
+    }
   }
   private beginInput() {
     if (this.inputId) return;
-    this.inputId = `g_user_${crypto.randomUUID()}`; this.inputText = "";
+    this.inputId = `g_user_${crypto.randomUUID()}`; this.inputText = ""; this.inputFinalized = false;
     // Transcription may arrive late; only Gemini's interruption event may stop a reply.
     this.emit({ type: "conversation.item.input_audio_transcription.delta", item_id: this.inputId, delta: "" });
   }
@@ -161,17 +189,52 @@ export class GeminiLive {
     for (const source of this.sources) { source.onended = null; try { source.stop(); } catch {} source.disconnect(); }
     this.sources.clear(); this.playAt = this.options.context.currentTime;
   }
+  private nativeSpeechStarted() {
+    if (!this.ready || this.closed || this.muted) return;
+    if (this.nativeSpeaking) return;
+    this.nativeSpeaking = true;
+    if (this.generating || this.sources.size || this.outputId) {
+      // Stop on-device immediately, without a server round trip. Keep streaming
+      // every microphone frame so Gemini can hear the whole interruption.
+      this.localInterrupted = true; this.cancelledTurn = this.generating;
+      this.dropOutput = this.generating;
+      this.stopAudio();
+      this.emit({ type: "input_audio_buffer.speech_started" });
+      this.outputId = ""; this.outputText = "";
+      this.finishInput(); this.inputId = ""; this.inputText = "";
+    }
+    this.beginInput(); this.options.onPhase("listening");
+  }
+  private nativeSpeechEnded() {
+    if (!this.ready || this.closed || this.muted || !this.nativeSpeaking) return;
+    this.nativeSpeaking = false;
+    this.finalizeNativeAudio();
+  }
+  private finalizeNativeAudio() {
+    if (!this.ready || this.closed || this.muted) return;
+    // Hybrid VAD finalizes input without waiting for a second silence timeout.
+    this.send({ realtimeInput: { audioStreamEnd: true } });
+    if (!this.sources.size) this.options.onPhase("thinking");
+  }
   private handleContent(content: ServerContent) {
     if (content.interrupted) {
+      if (!this.options.whisper && !this.localInterrupted) {
+        this.finishInput(); this.inputId = ""; this.inputText = "";
+        this.beginInput();
+      }
+      this.cancelledTurn = true; this.localInterrupted = false;
       this.stopAudio(); this.outputId = ""; this.outputText = ""; this.dropOutput = false; this.generating = false;
       this.emit({ type: "input_audio_buffer.speech_started" }); this.options.onPhase("listening");
     }
     if (!this.options.whisper && content.inputTranscription?.text) {
       this.beginInput(); this.inputText += content.inputTranscription.text;
-      this.emit({ type: "conversation.item.input_audio_transcription.completed", item_id: this.inputId, transcript: this.inputText });
-      this.options.onPhase("thinking");
+      this.emit(this.inputFinalized
+        ? { type: "conversation.item.input_audio_transcription.completed", item_id: this.inputId, transcript: this.inputText }
+        : { type: "conversation.item.input_audio_transcription.delta", item_id: this.inputId, delta: content.inputTranscription.text });
+      // Input text can arrive during speech; keep listening until output begins.
+      if (!this.generating) this.options.onPhase("listening");
     }
-    if (!this.dropOutput && (content.outputTranscription?.text || content.modelTurn?.parts?.length)) {
+    if (!content.interrupted && !this.dropOutput && !this.nativeSpeaking && (content.outputTranscription?.text || content.modelTurn?.parts?.length)) {
       this.finishInput();
       if (!this.outputId) { this.outputId = `g_mira_${crypto.randomUUID()}`; this.outputText = ""; }
       this.generating = true;
@@ -184,12 +247,15 @@ export class GeminiLive {
       }
     }
     if (content.turnComplete) {
-      this.finishInput(); this.inputId = ""; this.inputText = "";
+      // A canceled reply's boundary must not finalize/erase the new user turn.
+      const cancelled = this.cancelledTurn;
+      if (!cancelled) { this.finishInput(); this.inputId = ""; this.inputText = ""; }
       if (this.outputId && !this.dropOutput) this.emit({ type: "response.output_audio_transcript.done", item_id: this.outputId, transcript: this.outputText });
       this.outputId = ""; this.outputText = ""; this.generating = false; this.dropOutput = false;
+      this.cancelledTurn = false; this.localInterrupted = false;
       this.emit({ type: "response.done" });
       this.awaitingTurn = false;
-      if (!this.sources.size) this.options.onPhase(this.transcribing ? "transcribing" : "listening");
+      if (!this.sources.size) this.options.onPhase(this.transcribing ? "transcribing" : !this.options.whisper && cancelled && !this.nativeSpeaking ? "thinking" : "listening");
       this.flushWhisperText();
     }
   }
@@ -252,7 +318,7 @@ export class GeminiLive {
         if (!this.whisperSpeaking) this.options.onPhase("transcribing");
         const recording = this.recordings.shift()!;
         const response = await fetch(`/api/transcribe?language=${this.options.settings.language}`, {
-          method: "POST", headers: { "Content-Type": "audio/wav" }, body: recording,
+          method: "POST", headers: { "Content-Type": "audio/wav", ...await this.options.requestHeaders?.() }, body: recording,
           signal: AbortSignal.any([this.options.signal, AbortSignal.timeout(45000)]),
         });
         const data = await response.json() as { text?: string; error?: string };
@@ -275,6 +341,9 @@ export class GeminiLive {
     }
   }
   setMicMuted(muted: boolean) {
+    this.speechEndDetector?.reset();
+    this.nativeSpeaking = false;
+    if (this.localVad) void (muted ? this.localVad.pause() : this.localVad.start()).catch(() => {});
     if (this.options.whisper && muted) { this.recorder?.flush(); this.whisperSpeaking = false; this.flushWhisperText(); }
     this.muted = muted; this.capture?.port.postMessage({ enabled: !muted });
     if (muted && !this.options.whisper) this.send({ realtimeInput: { audioStreamEnd: true } });
@@ -283,6 +352,8 @@ export class GeminiLive {
   close() {
     this.closed = true; this.ready = false; cancelAnimationFrame(this.frame); this.stopAudio();
     this.recorder?.reset(); this.recordings = []; this.pendingWhisperText = ""; this.whisperActivity = false;
+    this.speechEndDetector?.reset();
+    if (this.localVad) { void this.localVad.destroy().catch(() => {}); this.localVad = null; }
     this.socket?.close(); this.capture?.disconnect(); this.capture?.port.close(); this.micSource?.disconnect();
     this.microphone?.getTracks().forEach(track => track.stop()); this.output.disconnect(); this.outputMeter.disconnect();
   }

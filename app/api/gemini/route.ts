@@ -1,6 +1,8 @@
-import { env } from "cloudflare:workers";
+import { env } from "@/lib/runtime-env";
 import { z } from "zod";
 import { api, identity, json, body, ApiError } from "@/lib/server";
+import { whisperConfiguration } from "@/lib/whisper-config";
+import { defaultGeminiModel, geminiGenerationConfig, geminiActivityDetection } from "@/lib/gemini-config";
 
 const settingsSchema = z.object({
   voice: z.enum(["marin", "cedar", "coral", "sage"]).default("marin"),
@@ -15,15 +17,15 @@ export async function POST(request: Request) {
     await identity(request);
     const settings = settingsSchema.parse(await body(request, 2000));
     if (!env.GEMINI_API_KEY) throw new ApiError(503, "The live voice service is not configured.");
-    const whisper = !!(env.WHISPER_URL && env.WHISPER_API_KEY);
-    const voice = { marin: "Aoede", cedar: "Charon", coral: "Puck", sage: "Kore" }[settings.voice];
+    const whisper = !!whisperConfiguration(env);
+    const model = env.GEMINI_LIVE_MODEL || defaultGeminiModel;
     const language = settings.language === "bn" ? "Speak Bengali unless asked otherwise." : settings.language === "en" ? "Speak English unless asked otherwise." : "Follow the user's language naturally, including Bengali and English.";
     const setup = {
-      model: `models/${env.GEMINI_LIVE_MODEL || "gemini-2.5-flash-native-audio-latest"}`,
-      generationConfig: { responseModalities: ["AUDIO"], maxOutputTokens: 1024, thinkingConfig: { thinkingBudget: 0 }, speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } } },
-      systemInstruction: { parts: [{ text: `You are Mira, a warm, attentive AI conversation companion. Never claim to be human. Listen closely, follow the user's meaning and emotion, and keep most replies to 1-2 short sentences; give longer explanations when asked. Answer directly without repeating the user's question or adding filler. Ask at most one relevant follow-up question. Let the user finish their thought. When interrupted, follow their latest thought rather than continuing your previous reply. Ignore incidental background noise and speech not addressed to you. If speech is unclear, ask instead of guessing. ${language}` }] },
+      model: model.startsWith("models/") ? model : `models/${model}`,
+      generationConfig: geminiGenerationConfig(model, settings.voice),
+      systemInstruction: { parts: [{ text: `You are Mira, a warm, attentive AI conversation companion. Speak with a soft, warm, gentle feminine voice at a natural conversational pace, without drawn-out pauses. Never claim to be human. Listen closely, follow the user's meaning and emotion, and keep most replies to 1-2 short sentences; give longer explanations when asked. Answer promptly and directly without repeating the user's question or adding filler. Ask at most one relevant follow-up question. Let the user finish their thought. When interrupted, follow their latest thought rather than continuing your previous reply. Ignore incidental background noise and speech not addressed to you. If speech is unclear, ask instead of guessing. ${language}` }] },
       inputAudioTranscription: {}, outputAudioTranscription: {},
-      realtimeInputConfig: { automaticActivityDetection: whisper ? { disabled: true } : { disabled: false, startOfSpeechSensitivity: settings.microphone === "far_field" ? "START_SENSITIVITY_LOW" : "START_SENSITIVITY_HIGH", endOfSpeechSensitivity: "END_SENSITIVITY_LOW", prefixPaddingMs: 200, silenceDurationMs: settings.pace === "low" ? 1000 : 600 }, activityHandling: "START_OF_ACTIVITY_INTERRUPTS" },
+      realtimeInputConfig: { automaticActivityDetection: geminiActivityDetection(settings.pace, whisper), activityHandling: "START_OF_ACTIVITY_INTERRUPTS" },
       contextWindowCompression: { slidingWindow: {} },
     };
     let response: Response;

@@ -15,6 +15,7 @@ export function pcmToWav(chunks: Int16Array[]) {
 
 export class UtteranceRecorder {
   private preRoll: Int16Array[] = [];
+  private preRollSamples = 0;
   private chunks: Int16Array[] = [];
   private samples = 0;
   private voiced = 0;
@@ -33,11 +34,12 @@ export class UtteranceRecorder {
     const speech = Math.sqrt(power / Math.max(1, samples.length)) > 0.008;
     const ms = samples.length / 16;
     if (!this.speaking) {
-      this.preRoll.push(samples); while (this.preRoll.length > 6) this.preRoll.shift();
+      this.preRoll.push(samples); this.preRollSamples += samples.length;
+      while (this.preRollSamples > 4800 && this.preRoll.length > 1) this.preRollSamples -= this.preRoll.shift()!.length;
       this.onset = speech ? this.onset + ms : 0;
       if (this.onset < 150) return;
       this.speaking = true; this.voiced = this.onset;
-      this.chunks = this.preRoll; this.preRoll = [];
+      this.chunks = this.preRoll; this.preRoll = []; this.preRollSamples = 0;
       this.samples = this.chunks.reduce((total, chunk) => total + chunk.length, 0);
       this.onStart(); return;
     }
@@ -53,6 +55,6 @@ export class UtteranceRecorder {
     this.onStop();
   }
   reset() {
-    this.preRoll = []; this.chunks = []; this.samples = this.voiced = this.onset = this.quiet = 0; this.speaking = false;
+    this.preRoll = []; this.preRollSamples = 0; this.chunks = []; this.samples = this.voiced = this.onset = this.quiet = 0; this.speaking = false;
   }
 }

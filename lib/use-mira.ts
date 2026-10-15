@@ -1,20 +1,28 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { defaultSettings, interruptTranscript, updateTranscript, type Message, type Snapshot, type VoiceSettings, type RealtimeEvent } from "./conversation";
 import type { AvatarAudio } from "./avatar-audio";
 import { GeminiLive } from "./gemini-live";
+import { authHeaders } from "./auth/firebase-client";
+import { useDrive } from "@/components/drive/drive-provider";
 
 type Phase = "idle" | "connecting" | "listening" | "transcribing" | "thinking" | "speaking" | "ended";
-type Config = { sessionReady: boolean; configured: boolean; provider: "openai" | "gemini"; transcription: "whisper" | "native"; name: string | null };
-type SaveState = "empty" | "saving" | "saved" | "error";
+type Config = { sessionReady: boolean; configured: boolean; provider: "openai" | "gemini"; transcription: "whisper" | "native"; transcriptionProvider?: "openai" | "self-hosted" | null; legacyHistoryAvailable?: boolean; name: string | null };
+type SaveState = "empty" | "unsaved" | "saving" | "saved" | "error";
 export async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, { ...init, signal: init?.signal ?? AbortSignal.timeout(15000), headers: { "Content-Type": "application/json", ...init?.headers } });
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (url !== "/api/config") for (const [name, value] of Object.entries(await authHeaders())) headers.set(name, value);
+  const response = await fetch(url, { ...init, signal: init?.signal ?? AbortSignal.timeout(15000), headers });
   const data = await response.json();
   if (!response.ok) throw new Error((data as { error?: string }).error || "Something went wrong. Please try again.");
   return data as T;
 }
 
 export function useMira() {
+  const drive = useDrive();
+  const driveRef = useRef(drive);
+  useLayoutEffect(() => { driveRef.current = drive; }, [drive]);
   const [avatarAudio, setAvatarAudio] = useState<AvatarAudio | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -26,6 +34,7 @@ export function useMira() {
   const [micLevel, setMicLevel] = useState(0);
   const [error, setError] = useState("");
   const [saveState, setSaveState] = useState<SaveState>("empty");
+  const [hasUnsaved, setHasUnsaved] = useState(false);
   const [config, setConfig] = useState<Config | null>(null);
   const [settings, setSettings] = useState<VoiceSettings>(defaultSettings);
   const [apiKey, setApiKey] = useState(""); // Deliberately memory-only; never persist credentials.
@@ -47,22 +56,24 @@ export function useMira() {
   const mounted = useRef(true);
 
   const transition = useCallback((next: Phase) => { ref.current.phase = next; if (mounted.current) setPhase(next); }, []);
-  const flush = useCallback(async () => {
-    if (saving.current) return;
+  const flush = useCallback(async (manual = false) => {
+    if (saving.current || !["idle", "ended"].includes(ref.current.phase)) return;
+    if (!manual && !driveRef.current.autoSave) return;
+    if (!driveRef.current.connected || !driveRef.current.folder) { if (mounted.current && pending.current.size) setSaveState("unsaved"); return; }
     saving.current = true;
     try {
       while (pending.current.size) {
         const snapshot = pending.current.values().next().value as Snapshot;
         if (mounted.current) setSaveState("saving");
         try {
-          await fetchJson("/api/conversations", { method: "PUT", body: JSON.stringify(snapshot) });
+          await driveRef.current.save(snapshot);
           if (pending.current.get(snapshot.id)?.revision === snapshot.revision) pending.current.delete(snapshot.id);
         } catch {
           if (mounted.current) setSaveState("error");
           return;
         }
       }
-      if (mounted.current) setSaveState("saved");
+      if (mounted.current) { setSaveState("saved"); setHasUnsaved(false); }
     } finally { saving.current = false; }
   }, []);
   const queueSave = useCallback((immediate = false) => {
@@ -70,10 +81,10 @@ export function useMira() {
     if (!current.id || !current.messages.length) return;
     const title = current.messages.find(m => m.role === "user" && m.text)?.text.slice(0, 90) || "A conversation with Mira";
     pending.current.set(current.id, { id: current.id, title, messages: current.messages, duration: current.duration, createdAt: current.createdAt, revision: ++current.revision });
-    if (mounted.current) setSaveState("saving");
+    if (mounted.current) { setSaveState("unsaved"); setHasUnsaved(true); }
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    if (immediate) void flush();
-    else saveTimer.current = setTimeout(() => void flush(), 700);
+    // Keep live speech in memory. Only completed calls are uploaded to Drive.
+    if (immediate && current.phase === "ended") void flush();
   }, [flush]);
   const changeMessages = useCallback((update: (old: Message[]) => Message[]) => {
     const next = update(ref.current.messages);
@@ -140,7 +151,7 @@ export function useMira() {
 
   const start = useCallback(async (textOnly = false, firstText = "") => {
     if (!["idle", "ended"].includes(ref.current.phase)) return;
-    if (pending.current.size) { setError("Your previous transcript is still saving. Please wait, or use Retry if saving failed."); return; }
+    if (pending.current.size) { setError("Your previous conversation is unsaved. Save it to Drive, download it, or choose Discard unsaved transcript before starting another."); return; }
     setError(""); setDuration(0); setMuted(textOnly); setAudioBlocked(false);
     ref.current.duration = 0; ref.current.muted = textOnly;
     ref.current.messages = []; setMessages([]); setSaveState("empty");
@@ -151,11 +162,12 @@ export function useMira() {
     connectTimer.current = setTimeout(() => { if (active() && ref.current.phase === "connecting") { end(); setError("The connection timed out. Check your network and try again."); } }, 35_000);
     try {
       if (!window.isSecureContext || !window.RTCPeerConnection) throw new Error("Live voice needs a secure browser. Open this page in the latest Chrome, Edge, or Safari.");
-      const audioContext = new AudioContext(); context.current = audioContext;
+      const audioContext = new AudioContext({ latencyHint: "interactive" }); context.current = audioContext;
       void audioContext.resume().catch(() => {});
       if (config?.provider === "gemini" && !apiKey) {
         const live = new GeminiLive({
           context: audioContext, settings, textOnly, signal: controller.signal, whisper: config.transcription === "whisper",
+          requestHeaders: authHeaders,
           onStream: capture => {
             stream.current = capture;
             const track = capture.getAudioTracks()[0];
@@ -283,7 +295,7 @@ export function useMira() {
       channel.onclose = () => { if (active()) { end(); setError("Your voice connection ended. Start again when you’re ready."); } };
       channel.onerror = () => { if (active()) { end(); setError("The live connection was interrupted. Please try again."); } };
       const offer = await connection.createOffer(); await connection.setLocalDescription(offer);
-      const response = await fetch("/api/realtime", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sdp: offer.sdp, apiKey: apiKey || undefined, ...settings }), signal: controller.signal });
+      const response = await fetch("/api/realtime", { method: "POST", headers: { "Content-Type": "application/json", ...await authHeaders() }, body: JSON.stringify({ sdp: offer.sdp, apiKey: apiKey || undefined, ...settings }), signal: controller.signal });
       if (!active()) return;
       if (!response.ok) { const data = await response.json() as { error?: string }; throw new Error(data.error || "Unable to connect. Please try again."); }
       await connection.setRemoteDescription({ type: "answer", sdp: await response.text() });
@@ -330,15 +342,11 @@ export function useMira() {
         if (elapsed >= 1800) { end(); setError("Your 30-minute session has ended. Start a new conversation whenever you’re ready."); }
       }
     }, 1000);
-    const retryTimer = setInterval(() => { if (pending.current.size) void flush(); }, 15000);
+    const retryTimer = setInterval(() => { if (pending.current.size && ["idle", "ended"].includes(ref.current.phase) && driveRef.current.connected && driveRef.current.autoSave) void flush(); }, 15000);
     const beforeUnload = (event: BeforeUnloadEvent) => { if (pending.current.size) { event.preventDefault(); event.returnValue = ""; } };
-    const pageHide = () => {
-      end();
-      for (const snapshot of pending.current.values()) {
-        const content = JSON.stringify(snapshot);
-        if (new Blob([content]).size < 60_000) void fetch("/api/conversations", { method: "PUT", headers: { "Content-Type": "application/json" }, body: content, keepalive: true }).catch(() => {});
-      }
-    };
+    // Closing a page cannot guarantee a Drive upload. Warn while unsaved; never
+    // fall back to saving a disconnected user's transcript in Mira's database.
+    const pageHide = () => { end(); };
     window.addEventListener("beforeunload", beforeUnload); window.addEventListener("pagehide", pageHide);
     return () => {
       mounted.current = false; clearInterval(timer); clearInterval(retryTimer); if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -348,5 +356,15 @@ export function useMira() {
   const updateSettings = useCallback((next: VoiceSettings) => {
     setSettings(next); try { localStorage.setItem("mira.voice-preferences", JSON.stringify(next)); } catch { /* Keep in-memory preferences. */ }
   }, []);
-  return { avatarAudio, phase, messages, duration, muted, volumeMuted, audioBlocked, level, micLevel, error, setError, saveState, config, settings, updateSettings, apiKey, setApiKey, voiceIsolation, start, end, toggleMic, toggleVolume, enableAudio, sendText, reset, retrySave: flush, currentId: ref.current.id, hasMicrophone: !!stream.current };
+  const finishAndSave = useCallback(async () => {
+    end();
+    const deadline = Date.now() + 20000;
+    while (saving.current && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100));
+    if (saving.current) return false;
+    await flush();
+    return pending.current.size === 0;
+  }, [end, flush]);
+  useEffect(() => { if (drive.connected && drive.folder && drive.autoSave && pending.current.size && ref.current.phase === "ended") void flush(); }, [drive.connected, drive.folder, drive.autoSave, flush]);
+  const discardUnsaved = useCallback(() => { pending.current.clear(); if (saveTimer.current) clearTimeout(saveTimer.current); setHasUnsaved(false); setSaveState("empty"); }, []);
+  return { avatarAudio, phase, messages, duration, muted, volumeMuted, audioBlocked, level, micLevel, error, setError, saveState, hasUnsaved, discardUnsaved, config, settings, updateSettings, apiKey, setApiKey, voiceIsolation, start, end, toggleMic, toggleVolume, enableAudio, sendText, reset, retrySave: () => flush(true), finishAndSave, currentId: ref.current.id, hasMicrophone: !!stream.current };
 }

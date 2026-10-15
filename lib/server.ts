@@ -1,6 +1,7 @@
-import { env } from "cloudflare:workers";
-import { browserToken, browserOwner } from "./browser-session";
+import { env } from "./runtime-env";
+import { verifyFirebaseToken } from "./auth/firebase-token";
 import { z } from "zod";
+import { requestOrigin } from "./request-origin";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -19,11 +20,12 @@ export async function api(action: () => Promise<Response>) {
 export async function identity(request: Request) {
   if (request.method !== "GET") {
     const origin = request.headers.get("origin");
-    if (origin && origin !== new URL(request.url).origin) throw new ApiError(403, "Please open Mira directly to continue.");
+    if (origin && origin !== requestOrigin(request)) throw new ApiError(403, "Please open Mira directly to continue.");
   }
-  const token = browserToken(request);
-  if (!token) throw new ApiError(401, "Please allow cookies for Mira and refresh the page to restore your browser session.");
-  return { userId: await browserOwner(token) };
+  const authorization = request.headers.get("authorization") || "";
+  if (!authorization.startsWith("Bearer ") || authorization.length > 16000) throw new ApiError(401, "Please sign in to continue.");
+  try { return await verifyFirebaseToken(authorization.slice(7)); }
+  catch { throw new ApiError(401, "Your sign-in has expired. Please sign in again."); }
 }
 export function database() {
   if (!env.DB) throw new ApiError(503, "Conversation history is temporarily unavailable. Your current transcript is still available to download.");

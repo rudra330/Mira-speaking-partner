@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import type { TalkingHead } from '@met4citizen/talkinghead';
 import { attachVisemes, loadVisemeWorklet, resetMouth, type AvatarAudio, type VisemeProcessor } from '@/lib/avatar-audio';
 
@@ -10,7 +10,7 @@ function loadAudioModule(): Promise<HeadAudioModule> {
   return audioModule ??= (import('@/lib/vendor/headaudio.min.mjs') as unknown as Promise<HeadAudioModule>).catch(error => { audioModule = undefined; throw error; });
 }
 
-export function TalkingAvatar({ audio, phase, muted }: { audio: AvatarAudio | null; phase: string; muted: boolean }) {
+export const TalkingAvatar = memo(function TalkingAvatar({ audio, phase, muted }: { audio: AvatarAudio | null; phase: string; muted: boolean }) {
   const container = useRef<HTMLDivElement>(null);
   const head = useRef<TalkingHead | null>(null);
   const processor = useRef<VisemeProcessor | null>(null);
@@ -40,8 +40,8 @@ export function TalkingAvatar({ audio, phase, muted }: { audio: AvatarAudio | nu
         avatar = new TalkingHead(container.current, {
           // The renderer owns a separate silent context; disposing it must never suspend a call.
           lipsyncModules: [], cameraView: 'head', cameraDistance: .8, cameraY: .45, cameraRotateEnable: false,
-          cameraPanEnable: false, cameraZoomEnable: false, modelFPS: 30,
-          modelPixelRatio: Math.min(window.devicePixelRatio, 1.5) / window.devicePixelRatio,
+          cameraPanEnable: false, cameraZoomEnable: false, modelFPS: 24,
+          modelPixelRatio: Math.min(window.devicePixelRatio, 1.25) / window.devicePixelRatio,
           avatarIdleEyeContact: .7, avatarSpeakingEyeContact: .85,
           avatarIdleHeadMove: reduced ? 0 : .18, avatarSpeakingHeadMove: reduced ? 0 : .22,
           modelMovementFactor: reduced ? 0 : .5,
@@ -105,11 +105,10 @@ export function TalkingAvatar({ audio, phase, muted }: { audio: AvatarAudio | nu
   }, [phase, muted]);
 
   return <div className={`talking-avatar avatar-${status}`} role="img" aria-label="Mira, an animated 3D AI companion">
-    {status !== 'ready' && <img src="/mira-avatar.png" className="portrait" alt="" />}
     <div ref={container} className="avatar-canvas" aria-hidden="true" />
     {status !== 'ready' && <div className="avatar-load-status" role="status">{status === 'loading' ? 'Bringing Mira to life…' : <>3D avatar unavailable. Voice still works. <button onClick={() => setAttempt(n => n + 1)}>Retry</button></>}</div>}
     {lipError && <div className="avatar-load-status" role="status">Lip sync unavailable. Your conversation can continue.</div>}
   </div>;
-}
+});
 
 

@@ -55,12 +55,25 @@ function fixture() {
   return { live, sent, events, phases, controller };
 }
 
+test('20 ms microphone chunks retain the speech onset in Whisper recordings', () => {
+  const clips = [];
+  const recorder = new UtteranceRecorder(() => {}, clip => clips.push(clip));
+  for (let i = 0; i < 15; i++) recorder.push(new Int16Array(320));
+  for (let i = 0; i < 30; i++) recorder.push(new Int16Array(320).fill(5000));
+  for (let i = 0; i < 23; i++) recorder.push(new Int16Array(320));
+  assert.equal(clips.length, 1);
+  const pcm = new Int16Array(clips[0], 44);
+  assert.equal(pcm.filter(value => value === 5000).length, 30 * 320);
+});
+
 test('Whisper text is displayed and sent to Gemini; microphone bytes are not sent to Gemini', async t => {
   const { live, sent, events } = fixture();
+  live.options.requestHeaders = async () => ({ Authorization: 'Bearer synthetic-test-token' });
   const wav = pcmToWav([new Int16Array(16000).fill(3000)]);
   t.mock.method(globalThis, 'fetch', async (url, init) => {
     assert.equal(url, '/api/transcribe?language=en');
     assert.equal(init.headers['Content-Type'], 'audio/wav');
+    assert.equal(init.headers.Authorization, 'Bearer synthetic-test-token');
     assert.equal(init.body, wav);
     return Response.json({ text: 'Can you hear me?' });
   });

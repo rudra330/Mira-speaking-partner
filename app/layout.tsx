@@ -1,5 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import "./auth.css";
+import "./drive.css";
+import { AuthProvider } from "@/components/auth/auth-provider";
 
 export const metadata: Metadata = {
   title: "Mira — A space to be heard",
@@ -17,7 +20,8 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className="antialiased">{children}</body>
+      <head><link rel="preload" href="/avatars/mira-brunette.glb" as="fetch" crossOrigin="anonymous" /></head>
+      <body className="antialiased"><AuthProvider>{children}</AuthProvider></body>
     </html>
   );
 }

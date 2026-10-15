@@ -1,6 +1,12 @@
 # Mira Whisper service
 
-Mira records short mono PCM16 WAV utterances in browser memory. `/api/transcribe` checks the browser session and forwards each clip to an authenticated faster-whisper service. The resulting text is saved as the user's voice transcript and sent to Gemini Live as a text turn. Gemini generates the avatar's spoken response. Raw recordings are not saved to the conversation database.
+Mira records short mono PCM16 WAV utterances in browser memory. `/api/transcribe` checks the browser session and forwards each clip to OpenAI-hosted Whisper or an authenticated faster-whisper service. The resulting text is saved as the user's voice transcript and sent to Gemini Live as a text turn. Gemini generates the avatar's spoken response. Raw recordings are not saved to the conversation database.
+
+## OpenAI-hosted Whisper
+
+Set `WHISPER_API_STYLE=openai`, `WHISPER_MODEL=whisper-1`, and `WHISPER_API_KEY` to an OpenAI project API key with transcription access and available API billing. No `WHISPER_URL` or separate server is required. The server sends WAV multipart uploads to the fixed `https://api.openai.com/v1/audio/transcriptions` endpoint; this key never reaches the browser. Configure `GEMINI_API_KEY` for the spoken replies. For local development, keep these credentials in ignored `.env.local`; for hosting, use server secrets. The separate `OPENAI_API_KEY` remains available for the alternative OpenAI Realtime voice path.
+
+If transcription credits are exhausted, set `WHISPER_ENABLED=false` to keep Start talking available through Gemini's native speech recognition. After restoring billing, set `WHISPER_ENABLED=true` to use OpenAI Whisper again.
 
 ## Cloud service
 

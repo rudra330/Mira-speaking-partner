@@ -1,6 +1,6 @@
 class MiraCapture extends AudioWorkletProcessor {
   constructor() {
-    super(); this.samples = new Int16Array(800); this.position = 0;
+    super(); this.samples = new Int16Array(320); this.position = 0;
     this.phase = 0; this.sum = 0; this.count = 0; this.enabled = true;
     this.port.onmessage = event => { this.enabled = event.data.enabled; this.position = this.phase = this.sum = this.count = 0; };
   }
@@ -15,7 +15,7 @@ class MiraCapture extends AudioWorkletProcessor {
         this.sum = this.count = 0;
         if (this.position === this.samples.length) {
           this.port.postMessage(this.samples.buffer, [this.samples.buffer]);
-          this.samples = new Int16Array(800); this.position = 0;
+          this.samples = new Int16Array(320); this.position = 0;
         }
       }
     }

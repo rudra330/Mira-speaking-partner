@@ -7,6 +7,7 @@ declare namespace Cloudflare {
     GEMINI_API_KEY?: string;
     GEMINI_LIVE_MODEL?: string;
     WHISPER_URL?: string;
+    WHISPER_ENABLED?: string;
     WHISPER_API_KEY?: string;
     WHISPER_API_STYLE?: string;
     WHISPER_MODEL?: string;
